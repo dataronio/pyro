@@ -3,7 +3,6 @@ from __future__ import absolute_import, division, print_function
 import argparse
 import logging
 import math
-import os
 
 import pandas as pd
 import torch
@@ -50,12 +49,7 @@ hyper-parameters) of running HMC on different problems.
     path lengths in Hamiltonian Monte Carlo", (https://arxiv.org/abs/1111.4246)
 """
 
-# work around with the error "RuntimeError: received 0 items of ancdata"
-# see https://discuss.pytorch.org/t/received-0-items-of-ancdata-pytorch-0-4-0/19823
-torch.multiprocessing.set_sharing_strategy('file_system')
 logging.basicConfig(format='%(message)s', level=logging.INFO)
-# Enable validation checks
-pyro.enable_validation(True)
 DATA_URL = "https://d2fefpcigoriu7.cloudfront.net/datasets/EfronMorrisBB.txt"
 
 
@@ -88,10 +82,10 @@ def not_pooled(at_bats, hits):
     :return: Number of hits predicted by the model.
     """
     num_players = at_bats.shape[0]
-    # TODO: use pyro.plate when pytorch 1.0 is released
-    phi_prior = Uniform(at_bats.new_tensor(0), at_bats.new_tensor(1)).expand_by([num_players]).independent(1)
-    phi = pyro.sample("phi", phi_prior)
-    return pyro.sample("obs", Binomial(at_bats, phi), obs=hits)
+    with pyro.plate("num_players", num_players):
+        phi_prior = Uniform(at_bats.new_tensor(0), at_bats.new_tensor(1))
+        phi = pyro.sample("phi", phi_prior)
+        return pyro.sample("obs", Binomial(at_bats, phi), obs=hits)
 
 
 def partially_pooled(at_bats, hits):
@@ -109,9 +103,10 @@ def partially_pooled(at_bats, hits):
     num_players = at_bats.shape[0]
     m = pyro.sample("m", Uniform(at_bats.new_tensor(0), at_bats.new_tensor(1)))
     kappa = pyro.sample("kappa", Pareto(at_bats.new_tensor(1), at_bats.new_tensor(1.5)))
-    phi_prior = Beta(m * kappa, (1 - m) * kappa).expand_by([num_players]).independent(1)
-    phi = pyro.sample("phi", phi_prior)
-    return pyro.sample("obs", Binomial(at_bats, phi), obs=hits)
+    with pyro.plate("num_players", num_players):
+        phi_prior = Beta(m * kappa, (1 - m) * kappa)
+        phi = pyro.sample("phi", phi_prior)
+        return pyro.sample("obs", Binomial(at_bats, phi), obs=hits)
 
 
 def partially_pooled_with_logit(at_bats, hits):
@@ -127,8 +122,9 @@ def partially_pooled_with_logit(at_bats, hits):
     num_players = at_bats.shape[0]
     loc = pyro.sample("loc", Normal(at_bats.new_tensor(-1), at_bats.new_tensor(1)))
     scale = pyro.sample("scale", HalfCauchy(scale=at_bats.new_tensor(1)))
-    alpha = pyro.sample("alpha", Normal(loc, scale).expand_by([num_players]).independent(1))
-    return pyro.sample("obs", Binomial(at_bats, logits=alpha), obs=hits)
+    with pyro.plate("num_players", num_players):
+        alpha = pyro.sample("alpha", Normal(loc, scale))
+        return pyro.sample("obs", Binomial(at_bats, logits=alpha), obs=hits)
 
 
 # ===================================
@@ -161,11 +157,11 @@ def summary(trace_posterior, sites, player_names, transforms={}, diagnostics=Tru
         if site_name in transforms:
             marginal_site = transforms[site_name](marginal_site)
 
-        site_stats[site_name] = get_site_stats(marginal_site.numpy(), player_names)
+        site_stats[site_name] = get_site_stats(marginal_site.cpu().numpy(), player_names)
         if diagnostics and trace_posterior.num_chains > 1:
             diag = marginal.diagnostics()[site_name]
-            site_stats[site_name] = site_stats[site_name].assign(n_eff=diag["n_eff"].numpy(),
-                                                                 r_hat=diag["r_hat"].numpy())
+            site_stats[site_name] = site_stats[site_name].assign(n_eff=diag["n_eff"].cpu().numpy(),
+                                                                 r_hat=diag["r_hat"].cpu().numpy())
     return site_stats
 
 
@@ -174,8 +170,9 @@ def train_test_split(pd_dataframe):
     Training data - 45 initial at-bats and hits for each player.
     Validation data - Full season at-bats and hits for each player.
     """
-    train_data = torch.tensor(pd_dataframe[["At-Bats", "Hits"]].values, dtype=torch.float)
-    test_data = torch.tensor(pd_dataframe[["SeasonAt-Bats", "SeasonHits"]].values, dtype=torch.float)
+    device = torch.Tensor().device
+    train_data = torch.tensor(pd_dataframe[["At-Bats", "Hits"]].values, dtype=torch.float, device=device)
+    test_data = torch.tensor(pd_dataframe[["SeasonAt-Bats", "SeasonHits"]].values, dtype=torch.float, device=device)
     first_name = pd_dataframe["FirstName"].values
     last_name = pd_dataframe["LastName"].values
     player_names = [" ".join([first, last]) for first, last in zip(first_name, last_name)]
@@ -233,7 +230,6 @@ def evaluate_log_predictive_density(posterior_predictive, baseball_dataset):
 
 
 def main(args):
-    pyro.set_rng_seed(args.rng_seed)
     baseball_dataset = pd.read_csv(DATA_URL, "\t")
     train, _, player_names = train_test_split(baseball_dataset)
     at_bats, hits = train[:, 0], train[:, 1]
@@ -274,23 +270,21 @@ def main(args):
     evaluate_log_predictive_density(posterior_predictive, baseball_dataset)
 
     # (3) Partially Pooled Model
-    # TODO: remove once htps://github.com/uber/pyro/issues/1458 is resolved
-    if "CI" not in os.environ:
-        nuts_kernel = NUTS(partially_pooled)
-        posterior_partially_pooled = MCMC(nuts_kernel,
-                                          num_samples=args.num_samples,
-                                          warmup_steps=args.warmup_steps,
-                                          num_chains=args.num_chains).run(at_bats, hits)
-        logging.info("\nModel: Partially Pooled")
-        logging.info("=======================")
-        logging.info("\nphi:")
-        logging.info(summary(posterior_partially_pooled, sites=["phi"],
-                             player_names=player_names)["phi"])
-        posterior_predictive = TracePredictive(partially_pooled,
-                                               posterior_partially_pooled,
-                                               num_samples=num_predictive_samples)
-        sample_posterior_predictive(posterior_predictive, baseball_dataset)
-        evaluate_log_predictive_density(posterior_predictive, baseball_dataset)
+    nuts_kernel = NUTS(partially_pooled)
+    posterior_partially_pooled = MCMC(nuts_kernel,
+                                      num_samples=args.num_samples,
+                                      warmup_steps=args.warmup_steps,
+                                      num_chains=args.num_chains).run(at_bats, hits)
+    logging.info("\nModel: Partially Pooled")
+    logging.info("=======================")
+    logging.info("\nphi:")
+    logging.info(summary(posterior_partially_pooled, sites=["phi"],
+                         player_names=player_names)["phi"])
+    posterior_predictive = TracePredictive(partially_pooled,
+                                           posterior_partially_pooled,
+                                           num_samples=num_predictive_samples)
+    sample_posterior_predictive(posterior_predictive, baseball_dataset)
+    evaluate_log_predictive_density(posterior_predictive, baseball_dataset)
 
     # (4) Partially Pooled with Logit Model
     nuts_kernel = NUTS(partially_pooled_with_logit)
@@ -313,13 +307,28 @@ def main(args):
 
 
 if __name__ == "__main__":
-    assert pyro.__version__.startswith('0.3.0')
+    assert pyro.__version__.startswith('0.3.1')
     parser = argparse.ArgumentParser(description="Baseball batting average using HMC")
     parser.add_argument("-n", "--num-samples", nargs="?", default=200, type=int)
     parser.add_argument("--num-chains", nargs='?', default=4, type=int)
     parser.add_argument("--warmup-steps", nargs='?', default=100, type=int)
     parser.add_argument("--rng_seed", nargs='?', default=0, type=int)
-    parser.add_argument('--jit', action='store_true', default=False,
-                        help='use PyTorch jit')
+    parser.add_argument("--jit", action="store_true", default=False,
+                        help="use PyTorch jit")
+    parser.add_argument("--cuda", action="store_true", default=False,
+                        help="run this example in GPU")
     args = parser.parse_args()
+
+    pyro.set_rng_seed(args.rng_seed)
+    # Enable validation checks
+    pyro.enable_validation(True)
+
+    # work around with the error "RuntimeError: received 0 items of ancdata"
+    # see https://discuss.pytorch.org/t/received-0-items-of-ancdata-pytorch-0-4-0/19823
+    torch.multiprocessing.set_sharing_strategy("file_system")
+
+    if args.cuda:
+        torch.set_default_tensor_type(torch.cuda.FloatTensor)
+        torch.multiprocessing.set_start_method("spawn", force=True)
+
     main(args)

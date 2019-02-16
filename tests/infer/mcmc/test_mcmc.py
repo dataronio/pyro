@@ -1,10 +1,16 @@
+from __future__ import absolute_import, division, print_function
+
+import os
+
+import pytest
 import torch
 
 import pyro
 import pyro.distributions as dist
 from pyro import poutine
-from pyro.infer.mcmc.mcmc import MCMC
+from pyro.infer.mcmc.mcmc import MCMC, _SingleSampler, _ParallelSampler
 from pyro.infer.mcmc.trace_kernel import TraceKernel
+from pyro.util import optional
 from tests.common import assert_equal
 
 
@@ -31,8 +37,8 @@ class PriorKernel(TraceKernel):
 
 
 def normal_normal_model(data):
-    x = pyro.param('loc', torch.tensor([0.0]))
-    y = pyro.sample('x', dist.Normal(x, torch.tensor([1.0])))
+    x = torch.tensor([0.0])
+    y = pyro.sample('y', dist.Normal(x, torch.ones(data.shape)))
     pyro.sample('obs', dist.Normal(y, torch.tensor([1.0])), obs=data)
     return y
 
@@ -47,3 +53,36 @@ def test_mcmc_interface():
     sample_std = marginal.variance.sqrt()
     assert_equal(sample_mean, torch.tensor([0.0]), prec=0.08)
     assert_equal(sample_std, torch.tensor([1.0]), prec=0.08)
+
+
+@pytest.mark.parametrize("num_chains", [
+    1,
+    pytest.param(2, marks=[pytest.mark.skipif("CI" in os.environ, reason="CI only provides 1 CPU")])
+])
+def test_mcmc_diagnostics(num_chains):
+    data = torch.tensor([2.0]).repeat(3)
+    kernel = PriorKernel(normal_normal_model)
+    mp_context = "spawn" if data.is_cuda else None
+    mcmc = MCMC(kernel=kernel, num_samples=10, num_chains=num_chains, mp_context=mp_context).run(data)
+    diagnostics = mcmc.marginal(["y"]).diagnostics()
+    assert diagnostics["y"]["n_eff"].shape == data.shape
+    assert diagnostics["y"]["r_hat"].shape == data.shape
+
+
+@pytest.mark.parametrize("num_chains, cpu_count", [
+    (1, 2),
+    (2, 1),
+    (2, 2),
+    (2, 3),
+])
+def test_num_chains(num_chains, cpu_count, monkeypatch):
+    monkeypatch.setattr(torch.multiprocessing, 'cpu_count', lambda: cpu_count)
+    kernel = PriorKernel(normal_normal_model)
+    available_cpu = max(1, cpu_count-1)
+    with optional(pytest.warns(UserWarning), available_cpu < num_chains):
+        mcmc = MCMC(kernel, num_samples=10, num_chains=num_chains)
+    assert mcmc.num_chains == min(num_chains, available_cpu)
+    if mcmc.num_chains == 1:
+        assert isinstance(mcmc.sampler, _SingleSampler)
+    else:
+        assert isinstance(mcmc.sampler, _ParallelSampler)

@@ -45,7 +45,7 @@ class Messenger(object):
         if not (self in _PYRO_STACK):
             # if this poutine is not already installed,
             # put it on the bottom of the stack.
-            _PYRO_STACK.insert(0, self)
+            _PYRO_STACK.append(self)
 
             # necessary to return self because the return value of __enter__
             # is bound to VAR in with EXPR as VAR.
@@ -88,8 +88,8 @@ class Messenger(object):
             # this poutine should be on the bottom of the stack.
             # If so, remove it from the stack.
             # if not, raise a ValueError because something really weird happened.
-            if _PYRO_STACK[0] == self:
-                _PYRO_STACK.pop(0)
+            if _PYRO_STACK[-1] == self:
+                _PYRO_STACK.pop()
             else:
                 # should never get here, but just in case...
                 raise ValueError("This Messenger is not on the bottom of the stack")
@@ -100,8 +100,8 @@ class Messenger(object):
             # then remove it and everything below it in the stack.
             if self in _PYRO_STACK:
                 loc = _PYRO_STACK.index(self)
-                for i in range(0, loc + 1):
-                    _PYRO_STACK.pop(0)
+                for i in range(loc, len(_PYRO_STACK)):
+                    _PYRO_STACK.pop()
 
     def _reset(self):
         pass
@@ -130,7 +130,7 @@ class Messenger(object):
         """
         :param fn: function implementing operation
         :param str type: name of the operation
-            (also passed to :func:~`pyro.poutine.runtime.effectful`)
+            (also passed to :func:`~pyro.poutine.runtime.effectful`)
         :param bool post: if `True`, use this operation as postprocess
 
         Dynamically add operations to an effect.
@@ -158,7 +158,7 @@ class Messenger(object):
         """
         :param fn: function implementing operation
         :param str type: name of the operation
-            (also passed to :func:~`pyro.poutine.runtime.effectful`)
+            (also passed to :func:`~pyro.poutine.runtime.effectful`)
 
         Dynamically remove operations from an effect.
         Useful for removing wrappers from libraries.

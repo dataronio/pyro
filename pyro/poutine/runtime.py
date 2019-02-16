@@ -125,9 +125,8 @@ class NonlocalExit(Exception):
     """
     def __init__(self, site, *args, **kwargs):
         """
-        :param site: message at a pyro site
-
-        constructor.  Just stores the input site.
+        :param site: message at a pyro site constructor.
+            Just stores the input site.
         """
         super(NonlocalExit, self).__init__(*args, **kwargs)
         self.site = site
@@ -137,7 +136,7 @@ class NonlocalExit(Exception):
         Reset the state of the frames remaining in the stack.
         Necessary for multiple re-executions in poutine.queue.
         """
-        for frame in _PYRO_STACK:
+        for frame in reversed(_PYRO_STACK):
             frame._reset()
             if type(frame).__name__ == "BlockMessenger" and frame.hide_fn(self.site):
                 break
@@ -146,10 +145,11 @@ class NonlocalExit(Exception):
 def default_process_message(msg):
     """
     Default method for processing messages in inference.
+
     :param msg: a message to be processed
     :returns: None
     """
-    if msg["done"] or msg["is_observed"]:
+    if msg["done"] or msg["is_observed"] or msg["value"] is not None:
         msg["done"] = True
         return msg
 
@@ -181,11 +181,11 @@ def apply_stack(initial_msg):
     # msg is used to pass information up and down the stack
     msg = initial_msg
 
-    counter = 0
+    pointer = 0
     # go until time to stop?
-    for frame in stack:
+    for frame in reversed(stack):
 
-        counter = counter + 1
+        pointer = pointer + 1
 
         frame._process_message(msg)
 
@@ -194,7 +194,7 @@ def apply_stack(initial_msg):
 
     default_process_message(msg)
 
-    for frame in reversed(stack[0:counter]):
+    for frame in stack[-pointer:]:  # reversed(stack[0:pointer])
         frame._postprocess_message(msg)
 
     cont = msg["continuation"]
@@ -217,7 +217,7 @@ def effectful(fn=None, type=None):
     :param fn: function or callable that performs an effectful computation
     :param str type: the type label of the operation, e.g. `"sample"`
 
-    Wrapper for calling :func:~`pyro.poutine.runtime.apply_stack` to apply any active effects.
+    Wrapper for calling :func:`~pyro.poutine.runtime.apply_stack` to apply any active effects.
     """
     if fn is None:
         return functools.partial(effectful, type=type)
